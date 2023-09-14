@@ -6,6 +6,10 @@ import type {
   DynamicParamTypesShort,
   FlightRouterState,
 } from '../app-render/types'
+import {
+  isDevRouteDefinition,
+  type RouteDefinition,
+} from '../future/route-definitions/route-definition'
 
 import { EventEmitter } from 'events'
 import { findPageFile } from '../lib/find-page-file'
@@ -33,10 +37,9 @@ import {
   COMPILER_NAMES,
   RSC_MODULE_TYPES,
 } from '../../shared/lib/constants'
-import { RouteMatch } from '../future/route-matches/route-match'
-import { isAppPageRouteMatch } from '../future/route-matches/app-page-route-match'
 import { HMR_ACTIONS_SENT_TO_BROWSER } from './hot-reloader-types'
 import HotReloader from './hot-reloader-webpack'
+import { isAppPageRouteDefinition } from '../future/route-definitions/app-page-route-definition'
 
 const debug = origDebug('next:on-demand-entry-handler')
 
@@ -359,6 +362,12 @@ function tryToNormalizePagePath(page: string) {
   }
 }
 
+type PagePathData = {
+  filename: string
+  bundlePath: string
+  page: string
+}
+
 /**
  * Attempts to find a page file path from the given pages absolute directory,
  * a page and allowed extensions. If the page can't be found it will throw an
@@ -375,7 +384,7 @@ async function findPagePathData(
   extensions: string[],
   pagesDir?: string,
   appDir?: string
-) {
+): Promise<PagePathData> {
   const normalizedPagePath = tryToNormalizePagePath(page)
   let pagePath: string | null = null
 
@@ -407,7 +416,7 @@ async function findPagePathData(
     }
 
     return {
-      absolutePagePath: join(rootDir, pagePath),
+      filename: join(rootDir, pagePath),
       bundlePath: bundlePath.slice(1),
       page: pageKey,
     }
@@ -425,7 +434,7 @@ async function findPagePathData(
       )
 
       return {
-        absolutePagePath: join(appDir, pagePath),
+        filename: join(appDir, pagePath),
         bundlePath: posix.join('app', pageUrl),
         page: posix.normalize(pageUrl),
       }
@@ -449,7 +458,7 @@ async function findPagePathData(
     )
 
     return {
-      absolutePagePath: join(pagesDir, pagePath),
+      filename: join(pagesDir, pagePath),
       bundlePath: posix.join('pages', normalizePagePath(pageUrl)),
       page: posix.normalize(pageUrl),
     }
@@ -457,9 +466,7 @@ async function findPagePathData(
 
   if (page === '/not-found' && appDir) {
     return {
-      absolutePagePath: require.resolve(
-        'next/dist/client/components/not-found-error'
-      ),
+      filename: require.resolve('next/dist/client/components/not-found-error'),
       bundlePath: 'app/not-found',
       page: '/not-found',
     }
@@ -467,7 +474,7 @@ async function findPagePathData(
 
   if (page === '/_error') {
     return {
-      absolutePagePath: require.resolve('next/dist/pages/_error'),
+      filename: require.resolve('next/dist/pages/_error'),
       bundlePath: page,
       page: normalizePathSep(page),
     }
@@ -476,22 +483,18 @@ async function findPagePathData(
   }
 }
 
-async function findRoutePathData(
+async function getPagePathData(
+  definition: RouteDefinition | null,
   rootDir: string,
   page: string,
   extensions: string[],
   pagesDir?: string,
-  appDir?: string,
-  match?: RouteMatch
-): ReturnType<typeof findPagePathData> {
-  if (match) {
-    // If the match is available, we don't have to discover the data from the
-    // filesystem.
-    return {
-      absolutePagePath: match.definition.filename,
-      page: match.definition.page,
-      bundlePath: match.definition.bundlePath,
-    }
+  appDir?: string
+): Promise<PagePathData> {
+  if (definition) {
+    if (isDevRouteDefinition(definition)) return definition.development
+
+    return definition
   }
 
   return findPagePathData(rootDir, page, extensions, pagesDir, appDir)
@@ -690,15 +693,11 @@ export function onDemandEntryHandler({
   async function ensurePageImpl({
     page,
     clientOnly,
-    appPaths = null,
-    match,
-    isApp,
+    definition,
   }: {
     page: string
     clientOnly: boolean
-    appPaths?: ReadonlyArray<string> | null
-    match?: RouteMatch
-    isApp?: boolean
+    definition: RouteDefinition | null
   }): Promise<void> {
     const stalledTime = 60
     const stalledEnsureTimeout = setTimeout(() => {
@@ -707,33 +706,18 @@ export function onDemandEntryHandler({
       )
     }, stalledTime * 1000)
 
-    // If the route is actually an app page route, then we should have access
-    // to the app route match, and therefore, the appPaths from it.
-    if (!appPaths && match && isAppPageRouteMatch(match)) {
-      appPaths = match.definition.appPaths
-    }
-
     try {
-      const pagePathData = await findRoutePathData(
+      const pagePathData = await getPagePathData(
+        definition,
         rootDir,
         page,
         nextConfig.pageExtensions,
         pagesDir,
-        appDir,
-        match
+        appDir
       )
 
       const isInsideAppDir =
-        !!appDir && pagePathData.absolutePagePath.startsWith(appDir)
-
-      if (typeof isApp === 'boolean' && isApp !== isInsideAppDir) {
-        Error.stackTraceLimit = 15
-        throw new Error(
-          `Ensure bailed, found path "${
-            pagePathData.page
-          }" does not match ensure type (${isApp ? 'app' : 'pages'})`
-        )
-      }
+        !!appDir && pagePathData.filename.startsWith(appDir)
 
       const pageBundleType = getPageBundleType(pagePathData.bundlePath)
       const addEntry = (
@@ -774,9 +758,12 @@ export function onDemandEntryHandler({
 
         curEntries[entryKey] = {
           type: EntryTypes.ENTRY,
-          appPaths,
-          absolutePagePath: pagePathData.absolutePagePath,
-          request: pagePathData.absolutePagePath,
+          appPaths:
+            definition && isAppPageRouteDefinition(definition)
+              ? definition.appPaths
+              : null,
+          absolutePagePath: pagePathData.filename,
+          request: pagePathData.filename,
           bundlePath: pagePathData.bundlePath,
           dispose: false,
           lastActiveTime: Date.now(),
@@ -791,7 +778,7 @@ export function onDemandEntryHandler({
 
       const staticInfo = await getStaticInfoIncludingLayouts({
         page,
-        pageFilePath: pagePathData.absolutePagePath,
+        pageFilePath: pagePathData.filename,
         isInsideAppDir,
         pageExtensions: nextConfig.pageExtensions,
         isDev: true,
@@ -893,6 +880,8 @@ export function onDemandEntryHandler({
         curInvalidator.invalidate([...added.keys()])
         await invalidatePromise
       }
+    } catch (err) {
+      throw err
     } finally {
       clearTimeout(stalledEnsureTimeout)
     }
@@ -905,17 +894,13 @@ export function onDemandEntryHandler({
     async ensurePage({
       page,
       clientOnly,
-      appPaths = null,
-      match,
-      isApp,
+      definition,
     }: {
       page: string
       clientOnly: boolean
-      appPaths?: ReadonlyArray<string> | null
-      match?: RouteMatch
-      isApp?: boolean
+      definition: RouteDefinition | null
     }) {
-      const ensureKey = JSON.stringify({ page, clientOnly, match, appPaths })
+      const ensureKey = JSON.stringify({ page, clientOnly, definition })
       const pendingEnsure = curEnsurePage.get(ensureKey)
 
       if (pendingEnsure) {
@@ -929,9 +914,7 @@ export function onDemandEntryHandler({
       const promise = ensurePageImpl({
         page,
         clientOnly,
-        appPaths,
-        match,
-        isApp,
+        definition,
         // we have to catch the error since we are memoizing
         // otherwise we can hit random unhandledRejections
       })
