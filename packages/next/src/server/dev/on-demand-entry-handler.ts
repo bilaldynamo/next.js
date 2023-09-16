@@ -40,6 +40,7 @@ import {
 import { HMR_ACTIONS_SENT_TO_BROWSER } from './hot-reloader-types'
 import HotReloader from './hot-reloader-webpack'
 import { isAppPageRouteDefinition } from '../future/route-definitions/app-page-route-definition'
+import { fileExists } from '../../lib/file-exists'
 
 const debug = origDebug('next:on-demand-entry-handler')
 
@@ -492,7 +493,16 @@ async function getPagePathData(
   appDir?: string
 ): Promise<PagePathData> {
   if (definition) {
-    if (isDevRouteDefinition(definition)) return definition.development
+    if (isDevRouteDefinition(definition)) definition = definition.development
+
+    // Validate that the file still exists now. This handles the case where
+    // the cache is stale and the file has been removed since calling ensure.
+    // There is multiple async await's between this and the actual usage of
+    // the file so it's possible the file is removed during that time.
+    const exists = await fileExists(definition.filename)
+    if (!exists) {
+      throw new PageNotFoundError(definition.page)
+    }
 
     return definition
   }
@@ -880,8 +890,6 @@ export function onDemandEntryHandler({
         curInvalidator.invalidate([...added.keys()])
         await invalidatePromise
       }
-    } catch (err) {
-      throw err
     } finally {
       clearTimeout(stalledEnsureTimeout)
     }
