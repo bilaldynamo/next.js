@@ -2503,7 +2503,9 @@ export default abstract class Server<ServerOptions extends Options = Options> {
   protected abstract getFallbackErrorComponents(): Promise<LoadComponentsReturnType | null>
   protected abstract getRoutesManifest(): NormalizedRouteManifest | undefined
 
-  protected getMatchOptions(ctx: RequestContext): MatchOptions {
+  protected getMatchOptions(
+    ctx: Pick<RequestContext, 'pathname' | 'query' | 'req'>
+  ): MatchOptions {
     const options: MatchOptions = {
       i18n: this.i18nProvider?.fromQuery(ctx.pathname, ctx.query),
       pathname: undefined,
